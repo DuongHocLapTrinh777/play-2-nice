@@ -1,0 +1,337 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>2-Player Game Demo (Single File Client)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    /* styles.css contents inlined */
+    body {
+      font-family: Arial, sans-serif;
+      margin: 12px;
+      background: #fafafa;
+    }
+    .panel {
+      max-width: 760px;
+      margin: 0 auto;
+      background: #fff;
+      padding: 12px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+    input, select, button {
+      padding: 6px 8px;
+      margin-right: 6px;
+    }
+    .inviteBox {
+      background: #f7f7ff;
+      padding: 8px;
+      border-radius: 6px;
+      margin-top: 8px;
+      border: 1px solid #ddd;
+    }
+    #gameCanvas {
+      border: 1px solid #ccc;
+      display: block;
+      background: linear-gradient(180deg,#fff,#eef);
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="lobby" class="panel">
+      <h2>Lobby</h2>
+      <div id="accountSection">
+        <div>
+          <input id="nameInput" placeholder="Nhập tên (đăng ký)" />
+          <button id="registerBtn">Đăng ký</button>
+        </div>
+        <div style="margin-top:8px;">
+          <input id="loginInput" placeholder="Hoặc nhập tên/ID để đăng nhập" />
+          <button id="loginBtn">Đăng nhập</button>
+        </div>
+        <div id="accountInfo" style="display:none;">
+          <p>Đang đăng nhập: <span id="meName"></span> (<span id="meId"></span>)</p>
+          <button id="logoutBtn">Đăng xuất (chỉ local)</button>
+        </div>
+      </div>
+
+      <hr/>
+
+      <div id="inviteSection" style="display:none;">
+        <h3>Mời bạn chơi</h3>
+        <input id="inviteInput" placeholder="Nhập tên hoặc ID bạn" />
+        <select id="modeSelect">
+          <option value="coop">Co-op</option>
+          <option value="pvp">PvP</option>
+        </select>
+        <button id="inviteBtn">Gửi lời mời</button>
+      </div>
+
+      <div id="incomingInvites"></div>
+
+      <div style="margin-top:12px;">
+        <button id="listBtn">Danh sách tài khoản (demo)</button>
+        <pre id="listArea" style="max-height:200px;overflow:auto;"></pre>
+      </div>
+    </div>
+
+    <div id="game" class="panel" style="display:none;">
+      <h2>Game</h2>
+      <p>Chế độ: <span id="gameMode"></span></p>
+      <p>Bạn: <span id="playerName"></span> | Đối thủ: <span id="opponentName"></span></p>
+      <canvas id="gameCanvas" width="640" height="360"></canvas>
+      <div style="margin-top:8px;">
+        <button id="leaveBtn">Thoát game</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    // app.js contents inlined
+    (() => {
+      const socket = io();
+
+      // UI elements
+      const nameInput = document.getElementById('nameInput');
+      const registerBtn = document.getElementById('registerBtn');
+      const loginInput = document.getElementById('loginInput');
+      const loginBtn = document.getElementById('loginBtn');
+      const accountInfo = document.getElementById('accountInfo');
+      const meNameSpan = document.getElementById('meName');
+      const meIdSpan = document.getElementById('meId');
+      const logoutBtn = document.getElementById('logoutBtn');
+
+      const inviteSection = document.getElementById('inviteSection');
+      const inviteInput = document.getElementById('inviteInput');
+      const modeSelect = document.getElementById('modeSelect');
+      const inviteBtn = document.getElementById('inviteBtn');
+
+      const incomingInvites = document.getElementById('incomingInvites');
+
+      const listBtn = document.getElementById('listBtn');
+      const listArea = document.getElementById('listArea');
+
+      const lobbyDiv = document.getElementById('lobby');
+      const gameDiv = document.getElementById('game');
+      const gameModeSpan = document.getElementById('gameMode');
+      const playerNameSpan = document.getElementById('playerName');
+      const opponentNameSpan = document.getElementById('opponentName');
+      const leaveBtn = document.getElementById('leaveBtn');
+
+      const canvas = document.getElementById('gameCanvas');
+      const ctx = canvas.getContext('2d');
+
+      let me = null; // {id,name}
+      let currentRoom = null;
+      let playersState = {}; // id -> {x,y}
+      let myMovement = { x: 0, y: 0 };
+
+      function showAccount(acc) {
+        me = acc;
+        meNameSpan.textContent = acc.name;
+        meIdSpan.textContent = acc.id;
+        accountInfo.style.display = 'block';
+        inviteSection.style.display = 'block';
+      }
+      function clearAccount() {
+        me = null;
+        meNameSpan.textContent = '';
+        meIdSpan.textContent = '';
+        accountInfo.style.display = 'none';
+        inviteSection.style.display = 'none';
+      }
+
+      registerBtn.onclick = () => {
+        const name = nameInput.value.trim();
+        if (!name) return alert('Nhập tên');
+        socket.emit('register', { name }, (res) => {
+          if (!res.ok) return alert('Lỗi: ' + (res.error || 'unknown'));
+          showAccount(res.account);
+          alert('Đăng ký thành công. ID: ' + res.account.id);
+        });
+      };
+
+      loginBtn.onclick = () => {
+        const q = loginInput.value.trim();
+        if (!q) return alert('Nhập tên hoặc ID');
+        socket.emit('login', { query: q }, (res) => {
+          if (!res.ok) return alert('Lỗi: ' + (res.error || 'unknown'));
+          showAccount(res.account);
+        });
+      };
+
+      logoutBtn.onclick = () => {
+        clearAccount();
+        // Note: server-side socket remains; this is just local logout for demo
+      };
+
+      inviteBtn.onclick = () => {
+        if (!me) return alert('Bạn chưa đăng nhập');
+        const to = inviteInput.value.trim();
+        if (!to) return alert('Nhập tên hoặc ID người muốn mời');
+        const mode = modeSelect.value;
+        socket.emit('invite', { to, mode }, (res) => {
+          if (!res.ok) return alert('Lỗi: ' + (res.error || 'unknown'));
+          alert('Lời mời đã gửi');
+        });
+      };
+
+      socket.on('invite_incoming', (data) => {
+        // data: { from: {id,name}, mode }
+        const box = document.createElement('div');
+        box.className = 'inviteBox';
+        box.innerHTML = `<strong>Lời mời:</strong> ${data.from.name} (${data.from.id}) - chế độ ${data.mode}
+          <br/><button class="acceptBtn">Chấp nhận</button> <button class="declineBtn">Từ chối</button>`;
+        incomingInvites.appendChild(box);
+        box.querySelector('.acceptBtn').onclick = () => {
+          socket.emit('respond_invite', { fromId: data.from.id, accept: true, mode: data.mode }, (res) => {
+            if (!res.ok) alert('Lỗi: ' + (res.error || 'unknown'));
+          });
+          incomingInvites.removeChild(box);
+        };
+        box.querySelector('.declineBtn').onclick = () => {
+          socket.emit('respond_invite', { fromId: data.from.id, accept: false }, (res) => {});
+          incomingInvites.removeChild(box);
+        };
+      });
+
+      socket.on('invite_response', (data) => {
+        // data: { from: {id,name}, accepted: false }
+        alert(`${data.from.name} đã từ chối lời mời`);
+      });
+
+      socket.on('start_game', (payload) => {
+        // payload: { roomId, mode, players: [{id,name}, {id,name}] }
+        currentRoom = payload.roomId;
+        gameModeSpan.textContent = payload.mode;
+        // determine my name and opponent
+        const p1 = payload.players[0];
+        const p2 = payload.players[1];
+        let meId = me && me.id;
+        let opp = p1.id === meId ? p2 : p1;
+        playerNameSpan.textContent = me ? me.name : '(Bạn)';
+        opponentNameSpan.textContent = opp.name + ' (' + opp.id + ')';
+        // set initial player positions if provided
+        playersState = {};
+        payload.players.forEach((p, idx) => {
+          playersState[p.id] = { x: 100 + idx * 180, y: 150 };
+        });
+        lobbyDiv.style.display = 'none';
+        gameDiv.style.display = 'block';
+        startGameLoop();
+      });
+
+      socket.on('game_state', (data) => {
+        if (!currentRoom || data.roomId !== currentRoom) return;
+        playersState = data.state.playersState || playersState;
+      });
+
+      socket.on('opponent_left', (data) => {
+        alert('Đối thủ đã rời: ' + data.by.name);
+        endGameCleanup();
+      });
+
+      socket.on('opponent_offline', (data) => {
+        alert('Đối thủ offline: ' + data.name);
+        endGameCleanup();
+      });
+
+      listBtn.onclick = () => {
+        socket.emit('list_accounts', null, (res) => {
+          if (!res.ok) return alert('Lỗi khi lấy danh sách');
+          listArea.textContent = JSON.stringify(res.accounts, null, 2);
+        });
+      };
+
+      leaveBtn.onclick = () => {
+        if (!currentRoom) return;
+        socket.emit('leave_game', { roomId: currentRoom }, () => {});
+        endGameCleanup();
+      };
+
+      // Simple movement with arrow keys / WASD
+      const keys = {};
+      window.addEventListener('keydown', (e) => { keys[e.key] = true; });
+      window.addEventListener('keyup', (e) => { keys[e.key] = false; });
+
+      function updateMovement() {
+        let dx = 0, dy = 0;
+        if (keys['ArrowUp'] || keys['w'] || keys['W']) dy -= 2;
+        if (keys['ArrowDown'] || keys['s'] || keys['S']) dy += 2;
+        if (keys['ArrowLeft'] || keys['a'] || keys['A']) dx -= 2;
+        if (keys['ArrowRight'] || keys['d'] || keys['D']) dx += 2;
+        return { dx, dy };
+      }
+
+      let gameInterval = null;
+
+      function startGameLoop() {
+        if (gameInterval) clearInterval(gameInterval);
+        gameInterval = setInterval(() => {
+          if (!currentRoom || !me) return;
+          const mv = updateMovement();
+          const p = playersState[me.id] || { x: 120, y: 120 };
+          p.x += mv.dx;
+          p.y += mv.dy;
+          // clamp
+          p.x = Math.max(10, Math.min(canvas.width - 10, p.x));
+          p.y = Math.max(10, Math.min(canvas.height - 10, p.y));
+          playersState[me.id] = p;
+          // send update to server
+          socket.emit('player_update', { roomId: currentRoom, pos: p });
+          draw();
+        }, 30);
+      }
+
+      function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // background
+        ctx.fillStyle = '#f0f0f8';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        // draw players
+        let i = 0;
+        for (const pid in playersState) {
+          const ps = playersState[pid];
+          ctx.beginPath();
+          ctx.arc(ps.x, ps.y, 16, 0, Math.PI * 2);
+          ctx.fillStyle = pid === me.id ? '#2b8aef' : '#ef3b3b';
+          ctx.fill();
+          ctx.closePath();
+          ctx.fillStyle = '#000';
+          ctx.fillText(getNameForId(pid), ps.x - 20, ps.y - 22);
+          i++;
+        }
+      }
+
+      function getNameForId(id) {
+        if (me && me.id === id) return me.name;
+        // try to get opponentNameSpan
+        const txt = opponentNameSpan.textContent || '';
+        if (txt.includes(id)) {
+          return txt.split(' ')[0];
+        }
+        return id;
+      }
+
+      function endGameCleanup() {
+        currentRoom = null;
+        playersState = {};
+        if (gameInterval) {
+          clearInterval(gameInterval);
+          gameInterval = null;
+        }
+        gameDiv.style.display = 'none';
+        lobbyDiv.style.display = 'block';
+      }
+
+      // Ask server who am i (in case reloaded)
+      socket.on('connect', () => {
+        // attempt to get identity if any persisted local (none in demo)
+      });
+
+    })();
+  </script>
+</body>
+</html>
